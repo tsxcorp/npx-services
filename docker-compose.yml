@@ -1,0 +1,16 @@
+nexpo-services:
+    container_name: "nexpo-services"
+    build:
+      context: ./nexpo-services    # thư mục chứa source code
+      dockerfile: Dockerfile
+    volumes:
+      - ./nexpo-services:/app      # mount source code
+    ports:
+      - "8000:8000"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: "ap-southeast-1"
+      # thêm các biến môi trường khác nếu cần
+    networks:
+      - app-network
