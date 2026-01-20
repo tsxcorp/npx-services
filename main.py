@@ -145,6 +145,58 @@ async def download_qr_code(text: str = Query(..., description="Nội dung mã QR
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi xử lý tải QR code: {str(e)}")
 
+@app.get("/download-qr-slug")
+async def download_qr_code_by_slug(slug: str = Query(..., description="Slug để tạo link QR code")):
+    """
+    Tạo QR code từ slug với domain từ .env và trả về file ảnh để tải về
+    URL sẽ là: {QR_DOMAIN}/{slug}
+    """
+    try:
+        if not slug.strip():
+            raise HTTPException(status_code=400, detail="Slug không được để trống")
+        
+        # Lấy domain từ .env
+        qr_domain = os.getenv('QR_DOMAIN', 'https://link.nexpo.vn/')
+        
+        # Đảm bảo domain kết thúc bằng /
+        if not qr_domain.endswith('/'):
+            qr_domain += '/'
+        
+        # Tạo URL đầy đủ
+        qr_url = f"{qr_domain}{slug}"
+        
+        # Tạo QR code
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_url)
+        qr.make(fit=True)
+        
+        # Tạo image
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Lưu vào buffer
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        
+        # Tạo tên file từ slug
+        file_name = f"qr_{slug}.png"
+        
+        return StreamingResponse(
+            buffer,
+            media_type="image/png",
+            headers={
+                "Content-Disposition": f"attachment; filename={file_name}"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi xử lý tải QR code: {str(e)}")
+
 def generate_qr_code_base64(content_qr: str) -> str:
     """
     Tạo QR code từ content_qr và trả về base64 string
