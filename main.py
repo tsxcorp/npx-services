@@ -10,7 +10,12 @@ import os
 from dotenv import load_dotenv
 import httpx
 import json
+import asyncio
 from typing import Optional, List
+
+# Global semaphore: max 5 concurrent AI scoring calls across ALL matching requests
+# Prevents OpenRouter rate-limit (429) when multiple exhibitors run simultaneously
+_ai_semaphore = asyncio.Semaphore(5)
 
 # Load environment variables
 load_dotenv()
@@ -364,6 +369,12 @@ class MatchRunRequest(BaseModel):
     event_id: int
     job_requirement_id: Optional[str] = None  # None = match all jobs in event
     exhibitor_id: Optional[str] = None
+    # Run config (all optional — backend has sensible defaults)
+    score_threshold: float = 0.5        # Min AI score to save (0.3–0.9)
+    max_candidates_per_job: int = 40    # Top-N candidates after keyword filter
+    keyword_threshold: float = 0.15     # Min keyword overlap before AI call
+    rescore_pending: bool = True        # Re-score existing pending suggestions
+    ai_model: str = "openai/gpt-4o-mini"  # AI model to use
 
 
 class MatchSuggestion(BaseModel):
@@ -423,7 +434,7 @@ async def directus_patch(path: str, data: dict) -> dict:
         return resp.json()
 
 
-async def score_match_with_gemini(job: dict, visitor_profile: dict) -> dict:
+async def score_match_with_gemini(job: dict, visitor_profile: dict, model: str = "openai/gpt-4o-mini") -> dict:
     """Use OpenRouter to score how well a visitor matches a job requirement."""
     if not OPENROUTER_API_KEY:
         return _simple_score_match(job, visitor_profile)
@@ -453,34 +464,35 @@ Respond ONLY with valid JSON in this exact format:
 }}"""
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "openai/gpt-4o-mini",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": 512,
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            text = result["choices"][0]["message"]["content"]
-            text = text.strip()
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            parsed = json.loads(text.strip())
-            return {
-                "score": float(parsed.get("score", 0.5)),
-                "matched_criteria": parsed.get("matched_criteria", {}),
-                "ai_reasoning": parsed.get("reasoning", ""),
-            }
+        async with _ai_semaphore:  # cap concurrent AI calls globally
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.1,
+                        "max_tokens": 512,
+                    },
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                text = result["choices"][0]["message"]["content"]
+                text = text.strip()
+                if text.startswith("```"):
+                    text = text.split("```")[1]
+                    if text.startswith("json"):
+                        text = text[4:]
+                parsed = json.loads(text.strip())
+                return {
+                    "score": float(parsed.get("score", 0.5)),
+                    "matched_criteria": parsed.get("matched_criteria", {}),
+                    "ai_reasoning": parsed.get("reasoning", ""),
+                }
     except Exception as e:
         return _simple_score_match(job, visitor_profile)
 
@@ -698,9 +710,9 @@ async def run_job_matching(request: MatchRunRequest):
         suggestions_created = 0
         suggestions_updated = 0
         all_suggestions: List[MatchSuggestion] = []
-        SCORE_THRESHOLD = 0.5       # Only save suggestions scoring ≥ 50%
-        KEYWORD_THRESHOLD = 0.15    # Require 15% word overlap before calling AI (was 0.05)
-        MAX_CANDIDATES_PER_JOB = 40 # Cap AI calls per job to top-N by keyword score
+        SCORE_THRESHOLD = max(0.1, min(0.95, request.score_threshold))
+        KEYWORD_THRESHOLD = max(0.0, min(0.5, request.keyword_threshold))
+        MAX_CANDIDATES_PER_JOB = max(5, min(200, request.max_candidates_per_job))
 
         for job in jobs:
             exhibitor_id = job.get("exhibitor_id")
@@ -726,7 +738,7 @@ async def run_job_matching(request: MatchRunRequest):
                 registration_id = submission.get("registration_id")
 
                 # Score with AI
-                score_result = await score_match_with_gemini(job, visitor_profile)
+                score_result = await score_match_with_gemini(job, visitor_profile, model=request.ai_model)
                 score = score_result["score"]
 
                 if score < SCORE_THRESHOLD:
@@ -757,8 +769,11 @@ async def run_job_matching(request: MatchRunRequest):
                 }
 
                 if existing:
-                    # Never touch approved/rejected suggestions — only refresh pending ones
-                    if existing["status"] != "pending":
+                    # Never touch approved/rejected/converted suggestions
+                    if existing["status"] not in ("pending",):
+                        continue
+                    # Respect rescore_pending config
+                    if not request.rescore_pending:
                         continue
                     await directus_patch(
                         f"/items/job_match_suggestions/{existing['id']}",
@@ -773,7 +788,8 @@ async def run_job_matching(request: MatchRunRequest):
         return MatchRunResponse(
             success=True,
             message=f"Matching complete. {suggestions_created} new, {suggestions_updated} refreshed. "
-                    f"Checked {len(jobs)} job(s) × top-{MAX_CANDIDATES_PER_JOB} of {total_candidates} candidates (keyword threshold {int(KEYWORD_THRESHOLD*100)}%).",
+                    f"Checked {len(jobs)} job(s) × top-{MAX_CANDIDATES_PER_JOB} of {total_candidates} candidates "
+                    f"(min score {int(SCORE_THRESHOLD*100)}%, keyword {int(KEYWORD_THRESHOLD*100)}%, model {request.ai_model}).",
             suggestions_created=suggestions_created,
             suggestions=all_suggestions,
         )
