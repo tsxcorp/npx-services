@@ -25,6 +25,28 @@
 - Xóa thêm 140 suggestions sau khi prod cũ chạy lại (lần 2 + 3 per-exhibitor)
 - State sạch: 269 pending ≥50%, 1 converted_to_meeting, 0 approved/rejected bị đụng
 
+### [2026-03] Meeting Notification System
+
+**`POST /send-email`** — plain email không QR (dùng cho notifications, payment failed)
+
+**`POST /meeting-notification`** — full notification engine:
+- Nhận `meeting_id + trigger`, tự resolve email + user_id từ Directus
+- `trigger=scheduled` → email exhibitor + in-app notification cho exhibitor
+- `trigger=confirmed` → email visitor
+- `trigger=cancelled` → email cả hai
+- Email song ngữ vi/en cho cả 3 triggers
+- CTA button link: `https://portal.nexpo.vn/meetings?event={event_id}&tab={tab}`
+  - `meeting_category=talent` → `tab=hiring`
+  - `meeting_category=business` → `tab=business`
+- In-app: POST `/items/notifications` vào Directus (graceful fail nếu collection chưa tạo)
+- Exhibitor email resolve: `exhibitor_events.representative_email` → `exhibitors.representative_email` → `exhibitors.user_id.email`
+- Visitor email resolve: form answers `is_email_contact=true` → fallback `registrations.email`
+
+**Directus `notifications` collection** (tạo 2026-03-25):
+- Fields: `id` (uuid, auto), `user_id`, `title`, `body`, `link`, `type`, `entity_type`, `entity_id`, `is_read`, `date_created`
+- Permissions: Exhibitor Admin Policy — read (filter `user_id=$CURRENT_USER`), update (`is_read` only)
+- Permissions: Tenant Admin — create/read/update full
+
 ---
 
 ## 🔄 In Progress / Chưa xong
@@ -37,6 +59,5 @@ _(không có task đang dở)_
 
 - [ ] Refactor `main.py` thành router modules (`routers/qr.py`, `routers/email.py`, v.v.)
 - [ ] `POST /send-email-with-qr`: thêm param `link_type: "registration"|"ticket"` — ảnh hưởng URL trong `inject_qr_extras()`
-- [ ] Thêm `POST /send-email` — gửi email không có QR (dùng cho payment failed, order expired)
 - [ ] APScheduler: expire pending ticket orders mỗi 5 phút (cần `apscheduler==3.10.4`)
 - [ ] `POST /generate-email-template`: thêm case `form_purpose = "ticket_confirmation"`

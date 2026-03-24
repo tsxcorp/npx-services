@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,13 +6,14 @@ import qrcode
 import io
 import base64
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 from dotenv import load_dotenv
 import httpx
 import json
 import asyncio
 from typing import Optional, List
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Global semaphore: max 5 concurrent AI scoring calls across ALL matching requests
 # Prevents OpenRouter rate-limit (429) when multiple exhibitors run simultaneously
@@ -20,7 +22,25 @@ _ai_semaphore = asyncio.Semaphore(5)
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(title="QR Code Generator API", version="1.0.0")
+_scheduler = AsyncIOScheduler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async def _run_reminders():
+        await send_meeting_reminders()
+    _scheduler.add_job(
+        _run_reminders,
+        'interval',
+        hours=1,
+        id='meeting_reminders',
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+    _scheduler.start()
+    yield
+    _scheduler.shutdown()
+
+app = FastAPI(title="QR Code Generator API", version="1.0.0", lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
@@ -357,6 +377,499 @@ async def send_bulk_email_with_qr(request: BulkEmailRequest):
                 errors.append(f"{recipient.email}: {str(e)[:150]}")
 
     return BulkEmailResponse(sent=sent, failed=failed, errors=errors)
+
+
+# ─── Plain Email (no QR) ──────────────────────────────────────────────────────
+
+class PlainEmailRequest(BaseModel):
+    to: str
+    subject: str
+    html: str
+    from_email: Optional[str] = None
+    sender_name: Optional[str] = "Nexpo"
+
+
+@app.post("/send-email")
+async def send_plain_email(request: PlainEmailRequest):
+    """Send a plain HTML email without QR code (e.g. notifications, payment failed)."""
+    if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
+        raise HTTPException(status_code=500, detail="Mailgun not configured")
+    if not request.to.strip():
+        raise HTTPException(status_code=400, detail="to is required")
+
+    sender_name = request.sender_name or "Nexpo"
+    from_email = request.from_email or f"{sender_name} <noreply@{MAILGUN_DOMAIN}>"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                auth=("api", MAILGUN_API_KEY),
+                data={"from": from_email, "to": request.to, "subject": request.subject, "html": request.html},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        return EmailResponse(success=True, message="Email sent", message_id=result.get("id", ""))
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=500, detail=f"Mailgun error: {e.response.status_code} - {e.response.text[:200]}")
+
+
+# ─── Meeting Notifications ────────────────────────────────────────────────────
+
+DIRECTUS_URL_NOTIFY = os.getenv("DIRECTUS_URL", "https://app.nexpo.vn")
+DIRECTUS_ADMIN_TOKEN_NOTIFY = os.getenv("DIRECTUS_ADMIN_TOKEN", "")
+
+
+class MeetingNotificationRequest(BaseModel):
+    meeting_id: str
+    trigger: str   # "scheduled" | "confirmed" | "cancelled"
+    event_name: Optional[str] = None
+
+
+async def _directus_get_notify(path: str) -> dict:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{DIRECTUS_URL_NOTIFY}{path}",
+            headers={"Authorization": f"Bearer {DIRECTUS_ADMIN_TOKEN_NOTIFY}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _directus_post_notify(path: str, data: dict) -> dict:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{DIRECTUS_URL_NOTIFY}{path}",
+            headers={"Authorization": f"Bearer {DIRECTUS_ADMIN_TOKEN_NOTIFY}", "Content-Type": "application/json"},
+            json=data,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _directus_patch_notify(path: str, data: dict) -> dict:
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.patch(
+            f"{DIRECTUS_URL_NOTIFY}{path}",
+            headers={"Authorization": f"Bearer {DIRECTUS_ADMIN_TOKEN_NOTIFY}", "Content-Type": "application/json"},
+            json=data,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def create_notification(
+    user_id: str,
+    title: str,
+    body: str = None,
+    link: str = None,
+    notif_type: str = None,
+    entity_type: str = None,
+    entity_id: str = None,
+) -> None:
+    """Create an in-app notification record in Directus. Silent — never raises."""
+    try:
+        payload = {"user_id": user_id, "title": title}
+        if body:
+            payload["body"] = body
+        if link:
+            payload["link"] = link
+        if notif_type:
+            payload["type"] = notif_type
+        if entity_type:
+            payload["entity_type"] = entity_type
+        if entity_id:
+            payload["entity_id"] = entity_id
+        await _directus_post_notify("/items/notifications", payload)
+    except Exception:
+        pass  # never crash the caller over a notification
+
+
+async def _resolve_visitor_email(registration_id: str) -> tuple[str, str]:
+    """Returns (email, full_name). Checks form answers first, falls back to registrations.email."""
+    try:
+        reg_resp = await _directus_get_notify(
+            f"/items/registrations/{registration_id}"
+            "?fields[]=id,full_name,email"
+        )
+        reg = reg_resp.get("data", {})
+        fallback_email = reg.get("email", "")
+        full_name = reg.get("full_name", "")
+
+        # Try form submissions — find answer for field with is_email_contact = true
+        subs_resp = await _directus_get_notify(
+            f"/items/form_submissions"
+            f"?filter[registration_id][_eq]={registration_id}"
+            "&fields[]=answers.value,answers.field.is_email_contact"
+            "&limit=10"
+        )
+        for sub in subs_resp.get("data", []):
+            for ans in sub.get("answers", []):
+                field = ans.get("field") or {}
+                if field.get("is_email_contact") and ans.get("value", "").strip():
+                    return ans["value"].strip(), full_name
+        return fallback_email, full_name
+    except Exception:
+        return "", ""
+
+
+async def _resolve_exhibitor_email(exhibitor_id: str, event_id: str) -> tuple[str, str]:
+    """Returns (email, company_name). Uses exhibitor_events.representative_email first."""
+    try:
+        # Booth-level email (per-event representative)
+        ee_resp = await _directus_get_notify(
+            f"/items/exhibitor_events"
+            f"?filter[exhibitor_id][_eq]={exhibitor_id}"
+            f"&filter[event_id][_eq]={event_id}"
+            "&fields[]=representative_email,nameboard,exhibitor_id.representative_email,exhibitor_id.user_id.email,exhibitor_id.translations.company_name,exhibitor_id.translations.languages_code"
+            "&limit=1"
+        )
+        items = ee_resp.get("data", [])
+        if not items:
+            return "", ""
+        ee = items[0]
+        ex = ee.get("exhibitor_id") or {}
+
+        # Email priority: booth email > company email > login email
+        email = (
+            ee.get("representative_email")
+            or ex.get("representative_email")
+            or (ex.get("user_id") or {}).get("email")
+            or ""
+        )
+
+        # Company name
+        translations = ex.get("translations") or []
+        t = next((t for t in translations if t.get("languages_code") == "vi-VN"), None) or (translations[0] if translations else {})
+        company_name = t.get("company_name") or ee.get("nameboard") or ""
+
+        return email, company_name
+    except Exception:
+        return "", ""
+
+
+def _meeting_notification_html(title: str, body_lines: list[str], cta_label: str = "", cta_url: str = "") -> str:
+    body_html = "".join(f"<p style='margin:8px 0;color:#374151;font-size:14px;'>{line}</p>" for line in body_lines)
+    cta_html = (
+        f"<div style='margin-top:24px;'>"
+        f"<a href='{cta_url}' style='display:inline-block;padding:10px 20px;background:#4F80FF;color:#fff;"
+        f"border-radius:8px;text-decoration:none;font-size:14px;font-weight:600;'>{cta_label}</a></div>"
+        if cta_label and cta_url else ""
+    )
+    return f"""
+<div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:32px 24px;background:#fff;">
+  <div style="margin-bottom:24px;">
+    <img src="https://app.nexpo.vn/assets/logo.png" alt="Nexpo" style="height:32px;" onerror="this.style.display='none'"/>
+  </div>
+  <h2 style="font-size:20px;font-weight:700;color:#111827;margin:0 0 16px;">{title}</h2>
+  {body_html}
+  {cta_html}
+  <hr style="margin:32px 0;border:none;border-top:1px solid #E5E7EB;"/>
+  <p style="font-size:12px;color:#9CA3AF;">This is an automated notification from Nexpo Platform.</p>
+</div>"""
+
+
+@app.post("/meeting-notification")
+async def send_meeting_notification(request: MeetingNotificationRequest):
+    """
+    Resolve meeting details from Directus and send notification emails.
+    trigger = "scheduled"  → email exhibitor
+    trigger = "confirmed"  → email visitor
+    trigger = "cancelled"  → email both parties
+    Also inserts in-app notification records (silently skips if collection missing).
+    """
+    if not DIRECTUS_ADMIN_TOKEN_NOTIFY:
+        raise HTTPException(status_code=500, detail="DIRECTUS_ADMIN_TOKEN not configured")
+
+    try:
+        # 1. Fetch meeting with all needed fields
+        m_resp = await _directus_get_notify(
+            f"/items/meetings/{request.meeting_id}"
+            "?fields[]=id,status,scheduled_at,location,meeting_type,meeting_category,"
+            "event_id,registration_id,exhibitor_id,job_requirement_id.job_title,"
+            "organizer_note"
+        )
+        meeting = m_resp.get("data", {})
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+
+        event_id = str(meeting.get("event_id", ""))
+        registration_id = str(meeting.get("registration_id", ""))
+        exhibitor_id = str(meeting.get("exhibitor_id", ""))
+        meeting_category = meeting.get("meeting_category") or "talent"
+        job_title = (meeting.get("job_requirement_id") or {}).get("job_title") or "vị trí này / this position"
+        event_name = request.event_name or "sự kiện / the event"
+
+        # Tab mapping: talent → hiring, business → business
+        tab = "hiring" if meeting_category == "talent" else "business"
+        portal_url = f"https://portal.nexpo.vn/meetings?event={event_id}&tab={tab}"
+
+        # Format scheduled time
+        scheduled_at = meeting.get("scheduled_at")
+        time_str = ""
+        if scheduled_at:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+                time_str = dt.strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                time_str = scheduled_at
+        location_str = meeting.get("location") or ""
+
+        # 2. Resolve emails
+        visitor_email, visitor_name = await _resolve_visitor_email(registration_id)
+        exhibitor_email, company_name = await _resolve_exhibitor_email(exhibitor_id, event_id)
+
+        emails_sent = []
+        in_app_created = []
+
+        # ── SCHEDULED: notify exhibitor ───────────────────────────────────────
+        if request.trigger == "scheduled" and exhibitor_email:
+            subject = f"[Nexpo] Yêu cầu gặp mặt mới / New meeting request — {visitor_name or 'Ứng viên / Candidate'}"
+            body_lines = [
+                f"Bạn có một yêu cầu gặp mặt mới từ <strong>{visitor_name or 'ứng viên'}</strong>.",
+                f"You have a new meeting request from <strong>{visitor_name or 'a candidate'}</strong>.",
+                f"<strong>Vị trí / Position:</strong> {job_title}",
+            ]
+            if time_str:
+                body_lines.append(f"<strong>Thời gian / Scheduled:</strong> {time_str}")
+            if location_str:
+                body_lines.append(f"<strong>Địa điểm / Location:</strong> {location_str}")
+            body_lines.append("Vui lòng đăng nhập vào portal để xác nhận hoặc đổi lịch. / Please log in to your exhibitor portal to confirm or reschedule.")
+            html = _meeting_notification_html(
+                "Yêu cầu gặp mặt mới / New Meeting Request", body_lines,
+                cta_label="Xem cuộc họp / View Meeting", cta_url=portal_url,
+            )
+            async with httpx.AsyncClient(timeout=30) as client:
+                mg_resp = await client.post(
+                    f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                    auth=("api", MAILGUN_API_KEY),
+                    data={"from": f"Nexpo <noreply@{MAILGUN_DOMAIN}>", "to": exhibitor_email, "subject": subject, "html": html},
+                )
+                if mg_resp.is_success:
+                    emails_sent.append(f"exhibitor:{exhibitor_email}")
+
+            # In-app notification for exhibitor (best-effort)
+            try:
+                ex_resp = await _directus_get_notify(
+                    f"/items/exhibitors/{exhibitor_id}?fields[]=user_id"
+                )
+                user_id = (ex_resp.get("data") or {}).get("user_id")
+                if user_id:
+                    await _directus_post_notify("/items/notifications", {
+                        "user_id": user_id,
+                        "title": "Yêu cầu gặp mặt mới",
+                        "body": f"{visitor_name or 'Ứng viên'} — {job_title}" + (f" · {time_str}" if time_str else ""),
+                        "link": portal_url,
+                        "type": "meeting_scheduled",
+                        "entity_type": "meeting",
+                        "entity_id": request.meeting_id,
+                    })
+                    in_app_created.append(f"exhibitor:{user_id}")
+            except Exception:
+                pass  # notifications collection may not exist yet
+
+        # ── CONFIRMED: notify visitor ─────────────────────────────────────────
+        elif request.trigger == "confirmed" and visitor_email:
+            subject = f"[Nexpo] Cuộc họp đã được xác nhận / Meeting confirmed — {company_name or 'Exhibitor'}"
+            body_lines = [
+                f"Cuộc họp của bạn với <strong>{company_name or 'nhà tuyển dụng'}</strong> đã được xác nhận.",
+                f"Your meeting with <strong>{company_name or 'the exhibitor'}</strong> has been confirmed.",
+                f"<strong>Vị trí / Position:</strong> {job_title}",
+            ]
+            if time_str:
+                body_lines.append(f"<strong>Thời gian / When:</strong> {time_str}")
+            if location_str:
+                body_lines.append(f"<strong>Địa điểm / Where:</strong> {location_str}")
+            body_lines.append("Vui lòng đến đúng giờ. Chúc bạn buổi gặp mặt thành công! / Please be on time. We look forward to seeing you!")
+            html = _meeting_notification_html(
+                "Cuộc họp đã được xác nhận! / Meeting Confirmed!", body_lines,
+            )
+            async with httpx.AsyncClient(timeout=30) as client:
+                mg_resp = await client.post(
+                    f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                    auth=("api", MAILGUN_API_KEY),
+                    data={"from": f"Nexpo <noreply@{MAILGUN_DOMAIN}>", "to": visitor_email, "subject": subject, "html": html},
+                )
+                if mg_resp.is_success:
+                    emails_sent.append(f"visitor:{visitor_email}")
+
+        # ── CANCELLED: notify both ────────────────────────────────────────────
+        elif request.trigger == "cancelled":
+            for recipient_type, email, name in [
+                ("exhibitor", exhibitor_email, company_name),
+                ("visitor", visitor_email, visitor_name),
+            ]:
+                if not email:
+                    continue
+                if recipient_type == "visitor":
+                    body_lines = [
+                        f"Rất tiếc, cuộc họp của bạn với <strong>{company_name or 'nhà tuyển dụng'}</strong> đã bị hủy.",
+                        f"Unfortunately, your meeting with <strong>{company_name or 'the exhibitor'}</strong> has been cancelled.",
+                        f"<strong>Vị trí / Position:</strong> {job_title}",
+                        "Vui lòng liên hệ ban tổ chức nếu bạn có thắc mắc. / Please contact the organizer if you have any questions.",
+                    ]
+                else:
+                    body_lines = [
+                        f"Cuộc họp với <strong>{visitor_name or 'ứng viên'}</strong> đã bị hủy.",
+                        f"The meeting with <strong>{visitor_name or 'the candidate'}</strong> has been cancelled.",
+                        f"<strong>Vị trí / Position:</strong> {job_title}",
+                    ]
+                html = _meeting_notification_html("Cuộc họp đã bị hủy / Meeting Cancelled", body_lines)
+                async with httpx.AsyncClient(timeout=30) as client:
+                    mg_resp = await client.post(
+                        f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                        auth=("api", MAILGUN_API_KEY),
+                        data={"from": f"Nexpo <noreply@{MAILGUN_DOMAIN}>", "to": email,
+                              "subject": f"[Nexpo] Cuộc họp đã bị hủy / Meeting cancelled — {job_title}", "html": html},
+                    )
+                    if mg_resp.is_success:
+                        emails_sent.append(f"{recipient_type}:{email}")
+
+            # In-app notification for exhibitor when cancelled
+            try:
+                ex_resp = await _directus_get_notify(f"/items/exhibitors/{exhibitor_id}?fields[]=user_id")
+                user_id = (ex_resp.get("data") or {}).get("user_id")
+                if user_id:
+                    await create_notification(
+                        user_id=user_id,
+                        title="Cuộc họp đã bị hủy",
+                        body=f"{visitor_name or 'Ứng viên'} — {job_title}",
+                        link=portal_url,
+                        notif_type="meeting_cancelled",
+                        entity_type="meeting",
+                        entity_id=request.meeting_id,
+                    )
+                    in_app_created.append(f"exhibitor_cancelled:{user_id}")
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "trigger": request.trigger,
+            "emails_sent": emails_sent,
+            "in_app_created": in_app_created,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Meeting notification error: {str(e)}")
+
+
+# ─── Meeting Reminder D-1 (APScheduler) ──────────────────────────────────────
+
+async def send_meeting_reminders() -> None:
+    """
+    APScheduler job — runs every hour.
+    Finds confirmed meetings scheduled 23-25h from now with reminder_sent IS NULL.
+    Sends bilingual reminder emails to exhibitor + visitor, then marks reminder_sent.
+    """
+    if not DIRECTUS_ADMIN_TOKEN_NOTIFY:
+        return
+
+    now = datetime.now(timezone.utc)
+    window_start = (now + timedelta(hours=23)).isoformat()
+    window_end = (now + timedelta(hours=25)).isoformat()
+
+    try:
+        resp = await _directus_get_notify(
+            "/items/meetings"
+            f"?filter[status][_eq]=confirmed"
+            f"&filter[scheduled_at][_gte]={window_start}"
+            f"&filter[scheduled_at][_lte]={window_end}"
+            f"&filter[reminder_sent][_null]=true"
+            "&fields[]=id,scheduled_at,location,meeting_category,event_id,"
+            "registration_id,exhibitor_id,job_requirement_id.job_title"
+            "&limit=100"
+        )
+        meetings = resp.get("data", [])
+    except Exception:
+        return
+
+    for meeting in meetings:
+        meeting_id = meeting.get("id")
+        event_id = str(meeting.get("event_id", ""))
+        registration_id = str(meeting.get("registration_id", ""))
+        exhibitor_id = str(meeting.get("exhibitor_id", ""))
+        meeting_category = meeting.get("meeting_category") or "talent"
+        job_title = (meeting.get("job_requirement_id") or {}).get("job_title") or "vị trí này / this position"
+        tab = "hiring" if meeting_category == "talent" else "business"
+        portal_url = f"https://portal.nexpo.vn/meetings?event={event_id}&tab={tab}"
+
+        scheduled_at = meeting.get("scheduled_at", "")
+        try:
+            dt = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+            time_str = dt.strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            time_str = scheduled_at
+
+        location_str = meeting.get("location") or ""
+
+        visitor_email, visitor_name = await _resolve_visitor_email(registration_id)
+        exhibitor_email, company_name = await _resolve_exhibitor_email(exhibitor_id, event_id)
+
+        reminder_body = [
+            f"<strong>Nhắc nhở / Reminder:</strong> Cuộc họp của bạn sẽ diễn ra vào ngày mai.",
+            f"<strong>Reminder:</strong> Your meeting is scheduled for tomorrow.",
+            f"<strong>Vị trí / Position:</strong> {job_title}",
+        ]
+        if time_str:
+            reminder_body.append(f"<strong>Thời gian / When:</strong> {time_str}")
+        if location_str:
+            reminder_body.append(f"<strong>Địa điểm / Where:</strong> {location_str}")
+
+        sent_count = 0
+
+        # Remind exhibitor
+        if exhibitor_email:
+            subject = f"[Nexpo] Nhắc lịch gặp mặt ngày mai / Meeting reminder tomorrow — {visitor_name or 'Ứng viên'}"
+            html = _meeting_notification_html(
+                "Nhắc lịch gặp mặt / Meeting Reminder",
+                reminder_body + ["Vui lòng chuẩn bị trước để buổi gặp mặt diễn ra suôn sẻ. / Please prepare in advance for a smooth meeting."],
+                cta_label="Xem lịch họp / View Meeting", cta_url=portal_url,
+            )
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    mg_resp = await client.post(
+                        f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                        auth=("api", MAILGUN_API_KEY),
+                        data={"from": f"Nexpo <noreply@{MAILGUN_DOMAIN}>", "to": exhibitor_email, "subject": subject, "html": html},
+                    )
+                    if mg_resp.is_success:
+                        sent_count += 1
+            except Exception:
+                pass
+
+        # Remind visitor
+        if visitor_email:
+            subject = f"[Nexpo] Nhắc lịch gặp mặt ngày mai / Meeting reminder tomorrow — {company_name or 'Exhibitor'}"
+            html = _meeting_notification_html(
+                "Nhắc lịch gặp mặt / Meeting Reminder",
+                reminder_body + ["Chúc bạn buổi gặp mặt thành công! / We look forward to seeing you!"],
+            )
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    mg_resp = await client.post(
+                        f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
+                        auth=("api", MAILGUN_API_KEY),
+                        data={"from": f"Nexpo <noreply@{MAILGUN_DOMAIN}>", "to": visitor_email, "subject": subject, "html": html},
+                    )
+                    if mg_resp.is_success:
+                        sent_count += 1
+            except Exception:
+                pass
+
+        # Mark reminder_sent to prevent duplicates
+        if sent_count > 0 and meeting_id:
+            try:
+                await _directus_patch_notify(
+                    f"/items/meetings/{meeting_id}",
+                    {"reminder_sent": datetime.now(timezone.utc).isoformat()},
+                )
+            except Exception:
+                pass
+
 
 # ─── Job Matching Engine ──────────────────────────────────────────────────────
 
@@ -710,6 +1223,7 @@ async def run_job_matching(request: MatchRunRequest):
         suggestions_created = 0
         suggestions_updated = 0
         all_suggestions: List[MatchSuggestion] = []
+        suggestions_by_exhibitor: dict[str, int] = {}  # exhibitor_id → new count
         SCORE_THRESHOLD = max(0.1, min(0.95, request.score_threshold))
         KEYWORD_THRESHOLD = max(0.0, min(0.5, request.keyword_threshold))
         MAX_CANDIDATES_PER_JOB = max(5, min(200, request.max_candidates_per_job))
@@ -783,6 +1297,25 @@ async def run_job_matching(request: MatchRunRequest):
                 else:
                     await directus_post("/items/job_match_suggestions", {**suggestion_data, "status": "pending"})
                     suggestions_created += 1
+                    ex_id = str(exhibitor_id) if exhibitor_id else ""
+                    if ex_id:
+                        suggestions_by_exhibitor[ex_id] = suggestions_by_exhibitor.get(ex_id, 0) + 1
+
+        # Send in-app notifications per exhibitor (best-effort)
+        for ex_id, count in suggestions_by_exhibitor.items():
+            try:
+                ex_resp = await directus_get(f"/items/exhibitors/{ex_id}?fields[]=user_id")
+                user_id = (ex_resp.get("data") or {}).get("user_id")
+                if user_id:
+                    await create_notification(
+                        user_id=user_id,
+                        title=f"{count} gợi ý matching mới",
+                        body="Xem danh sách ứng viên phù hợp từ AI matching",
+                        link=f"/matching/talent?event={event_id}&tab=suggestions",
+                        notif_type="matching_complete",
+                    )
+            except Exception:
+                pass
 
         total_candidates = len(submissions)
         return MatchRunResponse(
