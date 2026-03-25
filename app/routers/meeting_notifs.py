@@ -95,7 +95,7 @@ async def send_meeting_notification(request: MeetingNotificationRequest):
 
             # Also notify the event organizer with an admin link
             try:
-                admin_matching_url = f"{ADMIN_URL}/events/{event_id}/talent-matching/requests" if tab == "hiring" else f"{ADMIN_URL}/events/{event_id}/business-matching/requests"
+                admin_matching_url = f"{ADMIN_URL}/events/{event_id}/meetings?open={request.meeting_id}"
                 event_resp = await directus_get(f"/items/events/{event_id}?fields[]=user_created")
                 organizer_user_id = (event_resp.get("data") or {}).get("user_created")
                 if organizer_user_id:
