@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.scheduler import scheduler, send_meeting_reminders
-from app.routers import qr, email, matching, meeting_notifs, templates
+from app.routers import qr, email, matching, meeting_notifs, notify, templates
 
 
 @asynccontextmanager
@@ -49,6 +49,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(notify.router)
 app.include_router(qr.router)
 app.include_router(email.router)
 app.include_router(matching.router)

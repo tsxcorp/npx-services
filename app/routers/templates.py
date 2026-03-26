@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 import httpx
-from app.models.schemas import GenerateEmailTemplateRequest, GenerateEmailTemplateResponse
+from app.models.schemas import GenerateEmailTemplateRequest, GenerateEmailTemplateResponse, EmailStyleConfig
 from app.config import OPENROUTER_API_KEY
 
 router = APIRouter()
@@ -35,14 +35,30 @@ async def generate_email_template(request: GenerateEmailTemplateRequest):
     field_list = "\n".join(
         f'  - Variable: ${{{f.id}}} | Label: "{f.label}" | Type: {f.type}'
         for f in request.fields
-    )
+    ) or "  (none — use generic placeholder content)"
 
-    form_context = "registration confirmation" if request.is_registration else (request.form_purpose or "form submission confirmation")
+    form_context = "registration confirmation" if request.is_registration else (request.form_purpose or "meeting notification")
+
+    # ── Brand settings ────────────────────────────────────────────────────────
+    style = request.email_style or EmailStyleConfig()
+    primary = style.primary_color or "#E94560"
+    h_start = style.header_color_start or "#1a1a2e"
+    h_end   = style.header_color_end   or "#0f3460"
+    logo_html = (
+        f'<img src="{style.logo_url}" alt="Event Logo" style="max-height:48px;max-width:180px;display:block;" />'
+        if style.logo_url else
+        'Nexpo Platform'
+    )
+    event_label_badge = (style.event_label or request.event_name.upper())[:30]
+    custom_footer = style.footer_text or "This is an automated notification from Nexpo Platform."
+
+    section_header_bg = h_end  # use darker gradient end for section headers
+    form_context_title = form_context.title()
 
     name_field_hint = ""
     for f in request.fields:
         if any(kw in f.label.lower() for kw in ["name", "họ tên", "tên", "full name", "họ và tên"]):
-            name_field_hint = f"Use ${{{f.id}}} as the registrant's name in the greeting."
+            name_field_hint = f"Use ${{{f.id}}} as the recipient's name in the greeting."
             break
 
     prompt = f"""You are a world-class HTML email designer. Create a stunning, polished HTML email template for a {form_context} email. Think of award-winning transactional emails from top tech companies.
@@ -56,15 +72,15 @@ FORM FIELDS (insert these variables exactly as shown):
 {field_list}
 
 ═══════════════════════════════════════════════
-DESIGN SYSTEM — follow EXACTLY:
+DESIGN SYSTEM — follow EXACTLY (brand colors already set for this event):
 ═══════════════════════════════════════════════
 
 COLOR PALETTE:
   - Page background: #F0F4F8
   - Card background: #FFFFFF
-  - Header gradient: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)
-  - Accent / primary: #E94560  (use for badges, highlights, confirmation badge border)
-  - Section header bar: #0f3460 (dark navy)
+  - Header gradient: linear-gradient(135deg, {h_start} 0%, {h_end} 100%)
+  - Accent / primary: {primary}  (use for badges, highlights, confirmation badge border, CTA button)
+  - Section header bar: {section_header_bg} (dark)
   - Detail row odd bg: #F8FAFC
   - Detail row even bg: #FFFFFF
   - Detail label text: #64748B (slate-500)
@@ -81,6 +97,10 @@ TYPOGRAPHY:
   - Detail values: 15px, font-weight: 500, color: #1E293B
 
 SPACING: Use padding: 20px 24px for content areas. Row padding: 12px 16px. Section gap: margin-bottom: 16px.
+
+LOGO / BRANDING in header: Use exactly this for the logo area at top of header:
+  {logo_html}
+  Event badge label text: "{event_label_badge}"
 
 ═══════════════════════════════════════════════
 STRUCTURE — build in this exact order:
@@ -104,7 +124,7 @@ Do NOT split the outer card, header, greeting, section headers, QR, or footer in
    - Padding: 40px 32px 32px
    - Top: small event label badge — pill shape, border: 1.5px solid #E94560, color: #E94560, font-size: 11px, letter-spacing: 2px, padding: 4px 14px, border-radius: 20px, UPPERCASE
    - Main: event name in large bold white text (28px, font-weight: 800, margin: 16px 0 8px)
-   - Sub: "{form_context.title()}" subtitle in #94A3B8, 15px
+   - Sub: "{form_context_title}" subtitle in #94A3B8, 15px
    - Bottom decorative bar: 3px high table row, background: linear-gradient(90deg, #E94560, #0f3460)
 
 4. CONFIRMATION BADGE (between header and greeting)
@@ -145,7 +165,7 @@ Do NOT split the outer card, header, greeting, section headers, QR, or footer in
    - Top: event name in white, 14px, font-weight: 600
    - Middle: copyright line in #94A3B8, 13px
    - Divider: 1px solid #334155, margin: 12px 0
-   - Bottom: "Đây là email tự động, vui lòng không trả lời. / This is an automated email, please do not reply." in #64748B, 12px, font-style: italic
+   - Bottom: "{custom_footer}" in #64748B, 12px, font-style: italic
 
 ═══════════════════════════════════════════════
 DARK MODE SUPPORT — REQUIRED:

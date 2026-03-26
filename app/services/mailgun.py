@@ -1,5 +1,6 @@
 """Mailgun email delivery helpers."""
 import httpx
+from typing import Optional
 from app.config import MAILGUN_API_KEY, MAILGUN_DOMAIN, MAILGUN_API_URL
 
 
@@ -7,14 +8,17 @@ async def send_mailgun(
     to: str,
     subject: str,
     html: str,
-    from_email: str = None,
+    from_email: Optional[str] = None,
     sender_name: str = "Nexpo",
-    inline_files: list = None,
+    inline_files: Optional[list] = None,
+    attachments: Optional[list] = None,
 ) -> bool:
     """
     Send an email via Mailgun.
     Returns True on success, False on failure.
-    inline_files: list of (field_name, (filename, bytes, content_type)) tuples
+    inline_files: list of ("inline", (filename, bytes, content_type)) tuples
+    attachments:  list of ("attachment", (filename, bytes, content_type)) tuples
+                  e.g. [("attachment", ("invite.ics", ics_bytes, "text/calendar"))]
     """
     if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
         return False
@@ -22,17 +26,20 @@ async def send_mailgun(
     from_addr = from_email or f"{sender_name} <noreply@{MAILGUN_DOMAIN}>"
     data = {"from": from_addr, "to": to, "subject": subject, "html": html}
 
+    files = list(inline_files or []) + list(attachments or [])
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"{MAILGUN_API_URL}/v3/{MAILGUN_DOMAIN}/messages",
                 auth=("api", MAILGUN_API_KEY),
                 data=data,
-                files=inline_files or [],
+                files=files,
             )
             return resp.is_success
     except Exception:
         return False
+
 
 
 def meeting_notification_html(

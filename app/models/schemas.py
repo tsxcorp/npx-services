@@ -26,7 +26,7 @@ class EmailRequest(BaseModel):
 class EmailResponse(BaseModel):
     success: bool
     message: str
-    message_id: str = None
+    message_id: Optional[str] = None
 
 class BulkEmailRecipient(BaseModel):
     email: str
@@ -53,7 +53,14 @@ class PlainEmailRequest(BaseModel):
     sender_name: Optional[str] = "Nexpo"
 
 
-# ── Meeting Notifications ─────────────────────────────────────────────────────
+# ── Unified Notify ────────────────────────────────────────────────────────────
+
+class NotifyRequest(BaseModel):
+    type: str        # e.g. "meeting.scheduled", "order.facility.created"
+    context: dict    # type-specific fields — see routers/notify.py for per-type docs
+
+
+# ── Meeting Notifications (legacy) ────────────────────────────────────────────
 
 class MeetingNotificationRequest(BaseModel):
     meeting_id: str
@@ -95,6 +102,15 @@ class EmailTemplateField(BaseModel):
     label: str
     type: str
 
+class EmailStyleConfig(BaseModel):
+    """Event-level brand settings for consistent email styling."""
+    primary_color: Optional[str] = "#E94560"        # accent / CTA color
+    header_color_start: Optional[str] = "#1a1a2e"   # header gradient start
+    header_color_end: Optional[str] = "#0f3460"     # header gradient end
+    logo_url: Optional[str] = None                  # event logo URL
+    event_label: Optional[str] = None               # label badge text (e.g. "NEXPO 2025")
+    footer_text: Optional[str] = None               # custom footer message
+
 class GenerateEmailTemplateRequest(BaseModel):
     event_name: str
     form_purpose: Optional[str] = "registration"
@@ -102,6 +118,7 @@ class GenerateEmailTemplateRequest(BaseModel):
     language: str = "bilingual"
     tone: str = "professional"
     fields: List[EmailTemplateField] = []
+    email_style: Optional[EmailStyleConfig] = None  # event brand settings
 
 class GenerateEmailTemplateResponse(BaseModel):
     html: str
