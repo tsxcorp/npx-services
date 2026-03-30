@@ -21,21 +21,29 @@ def generate_qr_code_bytes(content_qr: str) -> bytes:
     return buffer.getvalue()
 
 
-def inject_qr_extras(html: str, content_qr: str) -> str:
+def inject_qr_extras(html: str, content_qr: str, link_type: str = "registration") -> str:
     """
     Inject UUID display text + Insight Hub button right after the QR img tag.
+    link_type: "registration" → insights.nexpo.vn/{content_qr}
+                "ticket"       → insights.nexpo.vn/ticket/{content_qr}
     If the extras are already injected (idempotent), skip.
     """
-    insight_url = f"https://insights.nexpo.vn/{content_qr}"
+    if link_type == "ticket":
+        insight_url = f"https://insights.nexpo.vn/ticket/{content_qr}"
+        label = "Ticket ID"
+    else:
+        insight_url = f"https://insights.nexpo.vn/{content_qr}"
+        label = "Mã đăng ký / Registration ID"
+
     if insight_url in html:
         return html  # already injected
 
     extras = (
         '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:12px;">'
         '<tr><td align="center">'
-        '<p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:1px;'
-        'text-transform:uppercase;color:#64748B;font-family:\'Segoe UI\',Arial,sans-serif;">'
-        'M&#227; &#273;&#259;ng k&#253; / Registration ID</p>'
+        f'<p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:1px;'
+        f'text-transform:uppercase;color:#64748B;font-family:\'Segoe UI\',Arial,sans-serif;">'
+        f'{label}</p>'
         f'<p style="margin:0;font-size:13px;font-family:\'Courier New\',monospace;'
         f'color:#1E293B;background:#F1F5F9;padding:6px 14px;border-radius:6px;'
         f'letter-spacing:0.5px;display:inline-block;">{content_qr}</p>'

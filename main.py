@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.services.scheduler import scheduler, send_meeting_reminders
+from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders
 from app.routers import qr, email, matching, meeting_notifs, notify, templates
 
 
@@ -16,6 +16,9 @@ async def lifespan(app: FastAPI):
     async def _run_reminders():
         await send_meeting_reminders()
 
+    async def _expire_orders():
+        await expire_pending_orders()
+
     scheduler.add_job(
         _run_reminders,
         'interval',
@@ -23,6 +26,14 @@ async def lifespan(app: FastAPI):
         id='meeting_reminders',
         replace_existing=True,
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        _expire_orders,
+        'interval',
+        minutes=5,
+        id='expire_pending_orders',
+        replace_existing=True,
+        misfire_grace_time=60,
     )
     scheduler.start()
     yield

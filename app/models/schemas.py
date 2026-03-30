@@ -24,6 +24,7 @@ class EmailRequest(BaseModel):
     content_qr: str
     registration_id: Optional[str] = None  # If provided, logs activity to registration_activities
     triggered_by: Optional[str] = None     # Who triggered this email (e.g. "self_registration", "admin")
+    link_type: Optional[str] = "registration"  # "registration" | "ticket" — controls Insight Hub URL
 
 class EmailResponse(BaseModel):
     success: bool

@@ -9,8 +9,65 @@ from app.services.directus import directus_get, directus_patch
 from app.services.directus import resolve_visitor_email, resolve_exhibitor_email
 from app.services.mailgun import send_mailgun, meeting_notification_html
 import httpx
+import logging
 
+logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
+
+
+async def expire_pending_orders() -> None:
+    """
+    APScheduler job — runs every 5 minutes.
+    Finds ticket_orders that have been in 'pending' status for > 30 minutes.
+    Marks them as 'cancelled' and rolls back quantity_sold on ticket_classes.
+    """
+    if not DIRECTUS_ADMIN_TOKEN:
+        return
+
+    now = datetime.now(timezone.utc)
+    expire_before = (now - timedelta(minutes=30)).isoformat()
+
+    try:
+        resp = await directus_get(
+            "/items/ticket_orders"
+            "?filter[status][_eq]=pending"
+            f"&filter[date_created][_lt]={expire_before}"
+            "&fields[]=id,ticket_class_id,quantity"
+            "&limit=100"
+        )
+        orders = resp.get("data", [])
+    except Exception as exc:
+        logger.warning("[expire_orders] Failed to fetch pending orders: %s", exc)
+        return
+
+    for order in orders:
+        order_id = order.get("id")
+        ticket_class_id = order.get("ticket_class_id")
+        quantity = int(order.get("quantity") or 1)
+
+        try:
+            # Mark order as cancelled
+            await directus_patch(f"/items/ticket_orders/{order_id}", {"status": "cancelled"})
+            logger.info("[expire_orders] Cancelled order %s", order_id)
+        except Exception as exc:
+            logger.error("[expire_orders] Failed to cancel order %s: %s", order_id, exc)
+            continue
+
+        if ticket_class_id:
+            try:
+                # Rollback: decrement quantity_sold
+                tc_resp = await directus_get(f"/items/ticket_classes/{ticket_class_id}?fields[]=quantity_sold")
+                current_sold = int((tc_resp.get("data") or {}).get("quantity_sold") or 0)
+                new_sold = max(0, current_sold - quantity)
+                await directus_patch(
+                    f"/items/ticket_classes/{ticket_class_id}",
+                    {"quantity_sold": new_sold},
+                )
+                logger.info("[expire_orders] Rolled back qty_sold for class %s (%d → %d)", ticket_class_id, current_sold, new_sold)
+            except Exception as exc:
+                logger.error("[expire_orders] Failed to rollback inventory for %s: %s", ticket_class_id, exc)
+
+
 
 
 async def send_meeting_reminders() -> None:

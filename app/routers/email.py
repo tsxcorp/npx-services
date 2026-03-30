@@ -60,7 +60,7 @@ async def send_email_with_qr(request: EmailRequest):
 
     qr_bytes = generate_qr_code_bytes(request.content_qr)
     html_with_qr = append_qr_cid_to_html(request.html)
-    html_with_qr = inject_qr_extras(html_with_qr, request.content_qr)
+    html_with_qr = inject_qr_extras(html_with_qr, request.content_qr, link_type=request.link_type or "registration")
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
