@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders
-from app.routers import qr, email, matching, meeting_notifs, notify, templates
+from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export
 
 
 @asynccontextmanager
@@ -66,6 +66,7 @@ app.include_router(email.router)
 app.include_router(matching.router)
 app.include_router(meeting_notifs.router)
 app.include_router(templates.router)
+app.include_router(pdf_export.router)
 
 
 if __name__ == "__main__":
