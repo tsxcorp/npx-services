@@ -135,7 +135,7 @@ def build_pdf_document(data: PDFApiRequest) -> bytes:
         Paragraph(f"Đại điện bởi: {cust.representative or '................'}", style_normal),
     ]
     
-    t_parties = Table([[vendor_info, "", buyer_info]], colWidths=[10.0*cm, 2*cm, 6.0*cm])
+    t_parties = Table([[vendor_info, buyer_info]], colWidths=[9.0*cm, 9.0*cm])
     t_parties.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
         ('LEFTPADDING', (0,0), (-1,-1), 0),
@@ -230,8 +230,8 @@ def build_pdf_document(data: PDFApiRequest) -> bytes:
         Paragraph(f"<b>{grand_total:,.0f}</b>", style_center_bold)
     ])
     
-    # Col Widths sum = 18cm (e.g. 0.8+1.5+2.2+2.0+1.5+1.5+1.5+1.5+1.0+1.0+1.7+1.8 = 18cm)
-    col_widths = [0.8*cm, 1.5*cm, 2.0*cm, 2.0*cm, 1.5*cm, 1.5*cm, 1.25*cm, 1.25*cm, 1.25*cm, 1.25*cm, 1.7*cm, 2.0*cm]
+    # Col Widths sum = 18cm (0.8+1.5+2.0+2.0+1.2+1.5+1.25*4+1.7+2.3 = 18.0)
+    col_widths = [0.8*cm, 1.5*cm, 2.0*cm, 2.0*cm, 1.2*cm, 1.5*cm, 1.25*cm, 1.25*cm, 1.25*cm, 1.25*cm, 1.7*cm, 2.3*cm]
     t_items = Table(table_data, colWidths=col_widths, repeatRows=2)
     
     ts = TableStyle([
