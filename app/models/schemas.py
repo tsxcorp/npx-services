@@ -144,3 +144,29 @@ class GenerateEmailTemplateRequest(BaseModel):
 class GenerateEmailTemplateResponse(BaseModel):
     html: str
     success: bool
+
+
+# ── Floor Plan AI Detection ──────────────────────────────────────────────────
+
+class ZoneBounds(BaseModel):
+    x_pct: float  # 0-100, left edge percentage
+    y_pct: float  # 0-100, top edge percentage
+    w_pct: float  # 0-100, width percentage
+    h_pct: float  # 0-100, height percentage
+
+class DetectedZone(BaseModel):
+    name: str
+    type: str  # exhibition_hall, lobby, parking, entrance, stage, etc.
+    bounds: ZoneBounds
+    confidence: float  # 0-1
+
+class ScaleHint(BaseModel):
+    estimated_total_area_sqm: Optional[float] = None
+
+class DetectZonesRequest(BaseModel):
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
+
+class DetectZonesResponse(BaseModel):
+    zones: List[DetectedZone]
+    scale_hint: Optional[ScaleHint] = None

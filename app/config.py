@@ -12,6 +12,8 @@ DIRECTUS_URL = os.getenv('DIRECTUS_URL', 'https://app.nexpo.vn')
 DIRECTUS_ADMIN_TOKEN = os.getenv('DIRECTUS_ADMIN_TOKEN', '')
 
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
+GOOGLE_AI_API_KEY = os.getenv('GOOGLE_AI_API_KEY', '')
+NOVITA_API_KEY = os.getenv('NOVITA_API_KEY', '')
 
 # App base URLs — dùng để build absolute links trong notifications
 # Exhibitor (portal) → PORTAL_URL, Organizer (admin) → ADMIN_URL

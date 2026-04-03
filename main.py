@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders, send_trial_reminders, expire_form_drafts
-from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export
+from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export, floor_plan
 from app.routers import subscriptions, webhooks_polar, webhooks_payos_subscription, invoices, coupons
 from app.services.dunning_service import process_dunning
 
@@ -102,6 +102,7 @@ app.include_router(webhooks_polar.router)
 app.include_router(webhooks_payos_subscription.router)
 app.include_router(invoices.router)
 app.include_router(coupons.router)
+app.include_router(floor_plan.router)
 
 
 if __name__ == "__main__":
