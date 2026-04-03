@@ -13,6 +13,7 @@ DEFAULT_TRIGGER_CHANNELS: dict[str, list[str]] = {
     "lead.captured": [],  # in-app only
     "candidate.interview_schedule": ["email"],
     "match.status_changed": ["email"],
+    "form.submitted": ["email"],
 }
 
 

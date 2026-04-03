@@ -300,3 +300,35 @@ def _trial_reminder_html(tenant_name: str, tier: str, days_left: int) -> str:
         <p style="color:#94a3b8;font-size:13px;margin:15px 0 0;">Hoặc tài khoản sẽ tự động chuyển sang gói miễn phí sau khi hết thời gian dùng thử.</p>
       </div>
     </div>"""
+
+
+async def expire_form_drafts() -> None:
+    """
+    APScheduler job — runs every hour.
+    Deletes form_drafts whose expires_at has passed.
+    """
+    if not DIRECTUS_ADMIN_TOKEN:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        resp = await directus_get(
+            "/items/form_drafts"
+            "?filter[status][_eq]=active"
+            f"&filter[expires_at][_lt]={now}"
+            "&fields[]=id"
+            "&limit=100"
+        )
+        drafts = resp.get("data", [])
+    except Exception as exc:
+        logger.warning("[expire_drafts] Failed to fetch expired drafts: %s", exc)
+        return
+
+    for draft in drafts:
+        try:
+            await directus_patch(f"/items/form_drafts/{draft['id']}", {"status": "expired"})
+        except Exception as exc:
+            logger.error("[expire_drafts] Failed to expire draft %s: %s", draft["id"], exc)
+
+    if drafts:
+        logger.info("[expire_drafts] Expired %d form drafts", len(drafts))
