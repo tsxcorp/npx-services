@@ -1,25 +1,32 @@
-import os
+"""
+Backward-compat shim. New code must import from `app.settings`.
+This file preserves all module-level names that existing services import.
+DO NOT add new vars here — add to settings.py instead.
+"""
 import asyncio
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.settings import settings
 
-MAILGUN_API_KEY = os.getenv('MAILGUN_API_KEY', '')
-MAILGUN_DOMAIN = os.getenv('MAILGUN_DOMAIN', '')
-MAILGUN_API_URL = os.getenv('MAILGUN_API_URL', 'https://api.mailgun.net')
+# ── LLM providers ────────────────────────────────────────────────────────────
+OPENROUTER_API_KEY: str = settings.openrouter_api_key
+GOOGLE_AI_API_KEY: str = settings.google_ai_api_key
+NOVITA_API_KEY: str = settings.novita_api_key
+OPENAI_API_KEY: str = settings.openai_api_key
 
-DIRECTUS_URL = os.getenv('DIRECTUS_URL', 'https://app.nexpo.vn')
-DIRECTUS_ADMIN_TOKEN = os.getenv('DIRECTUS_ADMIN_TOKEN', '')
+# ── Directus ─────────────────────────────────────────────────────────────────
+DIRECTUS_URL: str = settings.directus_url
+DIRECTUS_ADMIN_TOKEN: str = settings.directus_admin_token
 
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY', '')
-GOOGLE_AI_API_KEY = os.getenv('GOOGLE_AI_API_KEY', '')
-NOVITA_API_KEY = os.getenv('NOVITA_API_KEY', '')
+# ── Mailgun ───────────────────────────────────────────────────────────────────
+MAILGUN_API_KEY: str = settings.mailgun_api_key
+MAILGUN_DOMAIN: str = settings.mailgun_domain
+MAILGUN_API_URL: str = settings.mailgun_api_url
 
-# App base URLs — dùng để build absolute links trong notifications
-# Exhibitor (portal) → PORTAL_URL, Organizer (admin) → ADMIN_URL
-PORTAL_URL = os.getenv('PORTAL_URL', 'https://portal.nexpo.vn')
-ADMIN_URL = os.getenv('ADMIN_URL', 'https://platform.nexpo.vn')
+# ── App URLs ──────────────────────────────────────────────────────────────────
+PORTAL_URL: str = settings.portal_url
+ADMIN_URL: str = settings.admin_url
 
+# ── Concurrency primitive (preserved — matching_service imports this) ─────────
 # Global semaphore: max 5 concurrent AI scoring calls across ALL matching requests
 # Prevents OpenRouter rate-limit (429) when multiple exhibitors run simultaneously
 ai_semaphore = asyncio.Semaphore(5)
