@@ -69,7 +69,7 @@
 
 ## 📋 Backlog
 
-- [ ] `POST /send-email-with-qr`: thêm param `link_type: "registration"|"ticket"` — ảnh hưởng URL trong `inject_qr_extras()`
-- [ ] APScheduler: expire pending ticket orders mỗi 5 phút (cần `apscheduler==3.10.4`)
+- [x] `POST /send-email-with-qr`: `link_type` param — ✅ Already implemented in schemas.py
+- [x] APScheduler: expire pending ticket orders — ✅ Already implemented in scheduler.py
 - [ ] `POST /generate-email-template`: thêm case `form_purpose = "ticket_confirmation"`
-- [ ] Bug B-1: Meeting reminder scheduler chỉ filter `confirmed`, bỏ sót `scheduled`
+- [x] Bug B-1: Meeting reminder scheduler — ✅ FIXED 2026-04-07: `_in=confirmed,scheduled`

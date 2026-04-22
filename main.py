@@ -8,8 +8,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.scheduler import scheduler, send_meeting_reminders, expire_pending_orders, send_trial_reminders, expire_form_drafts
-from app.routers import qr, email, matching, meeting_notifs, notify, templates, pdf_export, floor_plan, auth
-from app.routers import subscriptions, webhooks_polar, webhooks_payos_subscription, invoices, coupons
+from app.routers import qr, email, matching, business_matching, meeting_notifs, notify, templates, pdf_export, floor_plan, auth, registrations
+from app.routers import subscriptions, webhooks_polar, webhooks_payos_subscription, invoices, coupons, broadcast
+from app.routers import nexclaude as nexclaude_router
+from app.routers import image as image_router
+from app.routers import email_template_ai_v2
 from app.services.dunning_service import process_dunning
 from app.services.password_reset_service import cleanup_expired_tokens
 
@@ -102,9 +105,11 @@ app.add_middleware(
 )
 
 app.include_router(notify.router)
+app.include_router(registrations.router)
 app.include_router(qr.router)
 app.include_router(email.router)
 app.include_router(matching.router)
+app.include_router(business_matching.router)
 app.include_router(meeting_notifs.router)
 app.include_router(templates.router)
 app.include_router(pdf_export.router)
@@ -113,8 +118,12 @@ app.include_router(webhooks_polar.router)
 app.include_router(webhooks_payos_subscription.router)
 app.include_router(invoices.router)
 app.include_router(coupons.router)
+app.include_router(broadcast.router)
 app.include_router(floor_plan.router)
 app.include_router(auth.router)
+app.include_router(nexclaude_router.router)
+app.include_router(image_router.router)
+app.include_router(email_template_ai_v2.router)
 
 
 if __name__ == "__main__":
